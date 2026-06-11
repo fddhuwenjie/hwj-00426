@@ -81,8 +81,7 @@ export class PlayerShip {
   public update(
     keys: Set<string>,
     mouseX: number,
-    mouseY: number,
-    deltaTime: number
+    mouseY: number
   ): void {
     const speed = GAME_CONFIG.PLAYER_SPEED;
     let dx = 0;

@@ -30,10 +30,15 @@ const Game = () => {
   const lastShotTimeRef = useRef(0);
   const enemiesRef = useRef<EnemyData[]>([]);
   const isShootingRef = useRef(false);
+  const bossSpawnedRef = useRef(false);
+  const shakeRef = useRef<{ active: boolean; intensity: number; endTime: number }>({
+    active: false,
+    intensity: 0,
+    endTime: 0,
+  });
 
   const {
     gameState,
-    player,
     setGameState,
     addScore,
     setWave,
@@ -42,6 +47,21 @@ const Game = () => {
     setIsWaveBreak,
     resetGame,
     updatePlayer,
+    setCurrentWeapon,
+    fireMissile,
+    addEnergy,
+    consumeEnergy,
+    setScreenEffect,
+    setBossWarning,
+    registerKill,
+    registerHit,
+    registerPowerUpCollected,
+    registerBossDefeated,
+    registerWaveComplete,
+    registerUltiKill,
+    setWaveStartHp,
+    incrementBulletKill,
+    updateMinimapData,
   } = useGameStore();
 
   useEffect(() => {
@@ -95,11 +115,83 @@ const Game = () => {
     particleSystemRef.current = new ParticleSystem(scene);
     waveManagerRef.current = new WaveManager();
 
+    const triggerShake = (intensity: number, duration: number) => {
+      shakeRef.current = {
+        active: true,
+        intensity,
+        endTime: Date.now() + duration,
+      };
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      keysRef.current.add(e.key.toLowerCase());
+      const key = e.key.toLowerCase();
+      keysRef.current.add(key);
       if (e.key === ' ') {
         e.preventDefault();
         isShootingRef.current = true;
+      }
+      if (key === '1') {
+        setCurrentWeapon('laser');
+      }
+      if (key === '2') {
+        setCurrentWeapon('missile');
+      }
+      if (key === '3') {
+        setCurrentWeapon('scatter');
+      }
+      if (key === 'e') {
+        const state = useGameStore.getState();
+        if (state.gameState !== 'playing') return;
+        if (fireMissile() && bulletManagerRef.current && playerShipRef.current) {
+          bulletManagerRef.current.createMissile(
+            playerShipRef.current.getShootPosition(),
+            enemiesRef.current
+          );
+        }
+      }
+      if (key === 'q') {
+        const state = useGameStore.getState();
+        if (state.gameState !== 'playing') return;
+        if (consumeEnergy() && particleSystemRef.current && enemyFactoryRef.current) {
+          const now = Date.now();
+          setScreenEffect({
+            type: 'flash_white',
+            startTime: now,
+            duration: 400,
+          });
+          triggerShake(0.5, 800);
+
+          let killCount = 0;
+          for (let i = enemiesRef.current.length - 1; i >= 0; i--) {
+            const enemy = enemiesRef.current[i];
+            const config = ENEMY_CONFIGS[enemy.type];
+            addScore(config.score);
+            particleSystemRef.current.createExplosion(
+              enemy.position,
+              config.color,
+              enemy.type === 'boss' ? 80 : 40
+            );
+
+            const energyGain =
+              enemy.type === 'boss'
+                ? GAME_CONFIG.ENERGY_PER_KILL_BOSS
+                : enemy.type === 'medium'
+                ? GAME_CONFIG.ENERGY_PER_KILL_MEDIUM
+                : GAME_CONFIG.ENERGY_PER_KILL_SMALL;
+            addEnergy(energyGain);
+
+            if (enemy.type === 'boss') {
+              registerBossDefeated();
+            }
+            registerKill();
+            killCount++;
+
+            enemyFactoryRef.current.removeEnemy(enemy);
+            enemiesRef.current.splice(i, 1);
+          }
+          registerUltiKill(killCount);
+          setEnemiesRemaining(enemiesRef.current.length);
+        }
       }
     };
 
@@ -174,65 +266,111 @@ const Game = () => {
     const scene = sceneRef.current;
     const renderer = rendererRef.current;
 
-    if (!playerShip || !enemyFactory || !bulletManager || !powerUpManager || 
-        !particleSystem || !waveManager || !camera || !scene || !renderer) return;
+    if (
+      !playerShip ||
+      !enemyFactory ||
+      !bulletManager ||
+      !powerUpManager ||
+      !particleSystem ||
+      !waveManager ||
+      !camera ||
+      !scene ||
+      !renderer
+    )
+      return;
 
     waveManager.startWave(1);
     setWave(1);
     setEnemiesRemaining(waveManager.getTotalEnemiesThisWave());
     setIsWaveBreak(false);
-    
+    setWaveStartHp(useGameStore.getState().player.hp);
+    bossSpawnedRef.current = false;
+
     let lastTime = performance.now();
 
+    const triggerShake = (intensity: number, duration: number) => {
+      shakeRef.current = {
+        active: true,
+        intensity,
+        endTime: Date.now() + duration,
+      };
+    };
+
     const animate = (currentTime: number) => {
-      const deltaTime = (currentTime - lastTime) / 16.67;
+      void ((currentTime - lastTime) / 16.67);
       lastTime = currentTime;
 
       const now = Date.now();
+      const state = useGameStore.getState();
 
-      if (player.fireRateBoost && now > player.fireRateEndTime) {
+      if (state.screenEffect && now > state.screenEffect.startTime + state.screenEffect.duration) {
+        setScreenEffect(null);
+      }
+
+      if (state.player.fireRateBoost && now > state.player.fireRateEndTime) {
         updatePlayer({ fireRateBoost: false });
       }
-      if (player.scatterBoost && now > player.scatterEndTime) {
+      if (state.player.scatterBoost && now > state.player.scatterEndTime) {
         updatePlayer({ scatterBoost: false });
       }
 
-      playerShip.update(keysRef.current, mouseRef.current.x, mouseRef.current.y, deltaTime);
+      playerShip.update(keysRef.current, mouseRef.current.x, mouseRef.current.y);
+
+      const shakeOffset = new THREE.Vector3();
+      if (shakeRef.current.active && now < shakeRef.current.endTime) {
+        const intensity = shakeRef.current.intensity;
+        shakeOffset.x = (Math.random() - 0.5) * intensity;
+        shakeOffset.y = (Math.random() - 0.5) * intensity;
+      } else {
+        shakeRef.current.active = false;
+      }
 
       const targetCameraPos = new THREE.Vector3(
         playerShip.position.x * 0.3,
         playerShip.position.y * 0.3 + GAME_CONFIG.CAMERA_HEIGHT,
         GAME_CONFIG.CAMERA_DISTANCE
-      );
+      ).add(shakeOffset);
       camera.position.lerp(targetCameraPos, 0.05);
-      camera.lookAt(playerShip.position.x, playerShip.position.y, playerShip.position.z - 5);
+      camera.lookAt(
+        playerShip.position.x + shakeOffset.x,
+        playerShip.position.y + shakeOffset.y,
+        playerShip.position.z - 5
+      );
 
-      const cooldown = player.fireRateBoost 
-        ? GAME_CONFIG.SHOOT_COOLDOWN_BOOSTED 
+      const currentWeapon = state.player.currentWeapon;
+      const cooldown = state.player.fireRateBoost
+        ? GAME_CONFIG.SHOOT_COOLDOWN_BOOSTED
         : GAME_CONFIG.SHOOT_COOLDOWN;
-      
+
       if (isShootingRef.current && now - lastShotTimeRef.current > cooldown) {
         const shootPos = playerShip.getShootPosition();
-        
-        if (player.scatterBoost) {
-          bulletManager.createPlayerBullet(shootPos, new THREE.Vector3(-0.2, 0, -1));
-          bulletManager.createPlayerBullet(shootPos, new THREE.Vector3(0, 0, -1));
-          bulletManager.createPlayerBullet(shootPos, new THREE.Vector3(0.2, 0, -1));
-        } else {
-          bulletManager.createPlayerBullet(shootPos);
+
+        if (currentWeapon === 'scatter') {
+          bulletManager.createScatterBullets(shootPos);
+        } else if (currentWeapon === 'laser') {
+          if (state.player.scatterBoost) {
+            bulletManager.createPlayerBullet(shootPos, new THREE.Vector3(-0.2, 0, -1), 'laser');
+            bulletManager.createPlayerBullet(shootPos, new THREE.Vector3(0, 0, -1), 'laser');
+            bulletManager.createPlayerBullet(shootPos, new THREE.Vector3(0.2, 0, -1), 'laser');
+          } else {
+            bulletManager.createPlayerBullet(shootPos, new THREE.Vector3(0, 0, -1), 'laser');
+          }
         }
-        
+
         lastShotTimeRef.current = now;
       }
 
       const waveResult = waveManager.update(now);
-      
+
       if (waveResult.isBreakComplete) {
+        registerWaveComplete();
         const nextWave = waveManager.getCurrentWave() + 1;
         waveManager.startWave(nextWave);
         setWave(nextWave);
         setEnemiesRemaining(waveManager.getTotalEnemiesThisWave());
         setIsWaveBreak(false);
+        setWaveStartHp(useGameStore.getState().player.hp);
+        bossSpawnedRef.current = false;
       } else if (waveResult.isWaveComplete) {
         waveManager.startBreak();
         setIsWaveBreak(true);
@@ -243,6 +381,17 @@ const Game = () => {
           }
         }
       } else if (waveResult.shouldSpawn && waveResult.enemyType) {
+        if (waveResult.enemyType === 'boss' && !bossSpawnedRef.current) {
+          bossSpawnedRef.current = true;
+          setBossWarning(true);
+          setScreenEffect({
+            type: 'warning',
+            startTime: now,
+            duration: 2000,
+          });
+          triggerShake(0.3, 2000);
+          setTimeout(() => setBossWarning(false), 2000);
+        }
         const enemy = enemyFactory.createEnemy(waveResult.enemyType, waveManager.getCurrentWave());
         enemiesRef.current.push(enemy);
         setEnemiesRemaining(enemiesRef.current.length);
@@ -252,7 +401,7 @@ const Game = () => {
 
       for (let i = enemiesRef.current.length - 1; i >= 0; i--) {
         const enemy = enemiesRef.current[i];
-        const shouldRemove = enemyFactory.updateEnemy(enemy, playerShip.position, now);
+        const shouldRemove = enemyFactory.updateEnemy(enemy, playerShip.position);
 
         if (enemyFactory.shouldShoot(enemy, now)) {
           bulletManager.createEnemyBullet(
@@ -268,11 +417,12 @@ const Game = () => {
         }
       }
 
-      bulletManager.update();
+      bulletManager.update(enemiesRef.current);
 
       const collectedPowerUp = powerUpManager.update(playerShip.position);
       if (collectedPowerUp) {
         handlePowerUpCollection(collectedPowerUp, now);
+        registerPowerUpCollected(collectedPowerUp.type);
         particleSystem.createExplosion(collectedPowerUp.position, 0x00ff00, 15);
       }
 
@@ -281,39 +431,70 @@ const Game = () => {
       const bullets = bulletManager.getBullets();
       for (let i = bullets.length - 1; i >= 0; i--) {
         const bullet = bullets[i];
-        
+
         if (bullet.isPlayerBullet) {
           for (let j = enemiesRef.current.length - 1; j >= 0; j--) {
             const enemy = enemiesRef.current[j];
             if (CollisionDetector.checkBulletEnemyCollision(bullet, enemy)) {
-              bulletManager.removeBullet(bullet);
-              
-              const isDead = enemyFactory.damage(enemy, 1);
-              if (isDead) {
+              const wasDead = enemy.hp <= 0;
+              const bulletKills = incrementBulletKill(bullet.id);
+
+              const isDead = enemyFactory.damage(enemy, bullet.damage);
+              if (isDead && !wasDead) {
                 const config = ENEMY_CONFIGS[enemy.type];
                 addScore(config.score);
-                particleSystem.createExplosion(enemy.position, config.color, enemy.type === 'boss' ? 60 : 30);
-                
+                particleSystem.createExplosion(
+                  enemy.position,
+                  config.color,
+                  enemy.type === 'boss' ? 60 : 30
+                );
+
+                const energyGain =
+                  enemy.type === 'boss'
+                    ? GAME_CONFIG.ENERGY_PER_KILL_BOSS
+                    : enemy.type === 'medium'
+                    ? GAME_CONFIG.ENERGY_PER_KILL_MEDIUM
+                    : GAME_CONFIG.ENERGY_PER_KILL_SMALL;
+                addEnergy(energyGain);
+
                 if (powerUpManager.shouldDropPowerUp()) {
                   const powerUpType = powerUpManager.getRandomPowerUpType();
                   powerUpManager.createPowerUp(enemy.position.clone(), powerUpType);
                 }
-                
+
+                if (enemy.type === 'boss') {
+                  registerBossDefeated();
+                  triggerShake(0.4, 600);
+                } else {
+                  triggerShake(0.05, 150);
+                }
+
+                registerKill(bulletKills >= 3, bullet.id);
+
                 enemyFactory.removeEnemy(enemy);
                 enemiesRef.current.splice(j, 1);
                 setEnemiesRemaining(enemiesRef.current.length);
               } else {
                 particleSystem.createExplosion(bullet.position, 0xffff00, 10);
               }
+
+              if (bullet.type !== 'missile') {
+                bulletManager.removeBullet(bullet);
+              } else {
+                particleSystem.createExplosion(bullet.position, 0xff6600, 25);
+                bulletManager.removeBullet(bullet);
+              }
               break;
             }
           }
         } else {
-          if (CollisionDetector.checkBulletPlayerCollision(
-            bullet, 
-            playerShip.position, 
-            playerShip.getBoundingRadius()
-          )) {
+          if (
+            CollisionDetector.checkBulletPlayerCollision(
+              bullet,
+              playerShip.position,
+              playerShip.getBoundingRadius()
+            )
+          ) {
             bulletManager.removeBullet(bullet);
             handlePlayerHit();
             particleSystem.createExplosion(bullet.position, 0xff0000, 15);
@@ -323,11 +504,13 @@ const Game = () => {
 
       for (let i = enemiesRef.current.length - 1; i >= 0; i--) {
         const enemy = enemiesRef.current[i];
-        if (CollisionDetector.checkEnemyPlayerCollision(
-          enemy, 
-          playerShip.position, 
-          playerShip.getBoundingRadius()
-        )) {
+        if (
+          CollisionDetector.checkEnemyPlayerCollision(
+            enemy,
+            playerShip.position,
+            playerShip.getBoundingRadius()
+          )
+        ) {
           const config = ENEMY_CONFIGS[enemy.type];
           particleSystem.createExplosion(enemy.position, config.color, 30);
           enemyFactory.removeEnemy(enemy);
@@ -336,6 +519,44 @@ const Game = () => {
           handlePlayerHit();
         }
       }
+
+      const mmEnemies = enemiesRef.current.map((e) => ({
+        id: e.id,
+        x: e.position.x,
+        y: e.position.y,
+        type: e.type,
+      }));
+
+      const mmPowerUps = powerUpManager
+        .getPowerUps()
+        .map((p) => ({ id: p.id, x: p.position.x, y: p.position.y, type: p.type }));
+
+      const indicators: { id: string; angle: number; isBoss: boolean }[] = [];
+      const boundaryX = GAME_CONFIG.PLAYER_BOUNDARY_X + 2;
+      const boundaryY = GAME_CONFIG.PLAYER_BOUNDARY_Y + 2;
+      for (const enemy of enemiesRef.current) {
+        const dx = enemy.position.x - playerShip.position.x;
+        const dy = enemy.position.y - playerShip.position.y;
+        const offscreen =
+          Math.abs(enemy.position.x) > boundaryX ||
+          Math.abs(enemy.position.y) > boundaryY;
+        if (offscreen) {
+          const angle = Math.atan2(dy, dx);
+          indicators.push({
+            id: `ind_${enemy.id}`,
+            angle,
+            isBoss: enemy.type === 'boss',
+          });
+        }
+      }
+
+      updateMinimapData(
+        playerShip.position.x,
+        playerShip.position.y,
+        mmEnemies,
+        mmPowerUps,
+        indicators
+      );
 
       renderer.render(scene, camera);
 
@@ -346,6 +567,8 @@ const Game = () => {
 
     const handlePlayerHit = () => {
       const currentState = useGameStore.getState();
+      registerHit();
+      triggerShake(0.2, 400);
       if (currentState.player.hasShield) {
         updatePlayer({ hasShield: false });
         particleSystem.createExplosion(playerShip.position, 0x0099ff, 30);
@@ -353,7 +576,7 @@ const Game = () => {
         const newHp = currentState.player.hp - 1;
         updatePlayer({ hp: newHp });
         particleSystem.createExplosion(playerShip.position, 0xff3366, 20);
-        
+
         if (newHp <= 0) {
           setGameState('gameover');
         }
@@ -361,26 +584,31 @@ const Game = () => {
     };
 
     const handlePowerUpCollection = (powerUp: PowerUpData, now: number) => {
+      const currentPlayer = useGameStore.getState().player;
       switch (powerUp.type) {
-        case 'health':
-          const newHp = Math.min(player.hp + 1, GAME_CONFIG.PLAYER_MAX_HP);
+        case 'health': {
+          const newHp = Math.min(currentPlayer.hp + 1, GAME_CONFIG.PLAYER_MAX_HP);
           updatePlayer({ hp: newHp });
           break;
-        case 'fireRate':
-          updatePlayer({ 
-            fireRateBoost: true, 
-            fireRateEndTime: now + GAME_CONFIG.POWER_UP_DURATION 
+        }
+        case 'fireRate': {
+          updatePlayer({
+            fireRateBoost: true,
+            fireRateEndTime: now + GAME_CONFIG.POWER_UP_DURATION,
           });
           break;
-        case 'shield':
+        }
+        case 'shield': {
           updatePlayer({ hasShield: true });
           break;
-        case 'scatter':
-          updatePlayer({ 
-            scatterBoost: true, 
-            scatterEndTime: now + GAME_CONFIG.POWER_UP_DURATION 
+        }
+        case 'scatter': {
+          updatePlayer({
+            scatterBoost: true,
+            scatterEndTime: now + GAME_CONFIG.POWER_UP_DURATION,
           });
           break;
+        }
       }
     };
 
@@ -416,8 +644,11 @@ const Game = () => {
       if (waveManagerRef.current) {
         waveManagerRef.current.reset();
       }
-      
+      bossSpawnedRef.current = false;
+
       if (gameState === 'gameover') {
+        const state = useGameStore.getState();
+        state.addLeaderboardEntry(state.score, state.wave);
         resetGame();
       }
     }

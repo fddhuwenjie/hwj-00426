@@ -115,7 +115,7 @@ export class EnemyFactory {
     return shield;
   }
 
-  public updateEnemy(enemy: EnemyData, playerPosition: THREE.Vector3, now: number): boolean {
+  public updateEnemy(enemy: EnemyData, playerPosition: THREE.Vector3): boolean {
     enemy.position.add(enemy.velocity);
 
     const dx = playerPosition.x - enemy.position.x;
